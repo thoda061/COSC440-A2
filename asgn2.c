@@ -1,7 +1,7 @@
 /**
  * File: asgn2.c
  * Date: 13/03/2011
- * Author: Your Name 
+ * Author: Daniel Thomson 
  * Version: 0.1
  *
  * This is a module which serves as a virtual ramdisk which disk size is
@@ -83,6 +83,7 @@ mpq page_queue;
 
 static atomic_t data_ready;
 
+//extern irqreturn_t dummyport_interrupt(int irq, void *dev_id);
 void readbuf_fun(unsigned long t_arg);
 static DECLARE_TASKLET(readbuf, readbuf_fun, 0);
 static DECLARE_WAIT_QUEUE_HEAD(read_wq);
@@ -612,6 +613,20 @@ int __init asgn2_init_module(void){
 	goto fail_proc_entry;
   }
 
+  gpio_dummy_init();
+
+  cbuf.head = 0;
+  cbuf.tail = 0;
+  cbuf.full = 0;
+
+  page_queue.head = 0;
+  page_queue.tail = 0;
+  page_queue.head_off = 0;
+  page_queue.tail_off = 0;
+
+  atomic_set(&data_ready, 0);
+
+
   asgn2_device.class = class_create(THIS_MODULE, MYDEV_NAME);
   if (IS_ERR(asgn2_device.class)) {
 	  result = -ENOMEM;
@@ -629,19 +644,7 @@ int __init asgn2_init_module(void){
   printk(KERN_WARNING "set up udev entry\n");
   printk(KERN_WARNING "Hello world from %s\n", MYDEV_NAME);
 
-  gpio_dummy_init();
-
-  cbuf.head = 0;
-  cbuf.tail = 0;
-  cbuf.full = 0;
-
-  page_queue.head = 0;
-  page_queue.tail = 0;
-  page_queue.head_off = 0;
-  page_queue.tail_off = 0;
-
-  atomic_set(&data_ready, 0);
-
+  
   return 0;
 
   /* cleanup code called when any of the initialization steps fail */
@@ -668,7 +671,6 @@ fail_cdev:
  * Finalise the module
  */
 void __exit asgn2_exit_module(void){
-  gpio_dummy_exit();
   device_destroy(asgn2_device.class, asgn2_device.dev);
   class_destroy(asgn2_device.class);
   printk(KERN_WARNING "cleaned up udev entry\n");
@@ -679,6 +681,7 @@ void __exit asgn2_exit_module(void){
    * cleanup in reverse order
    */
   free_memory_pages();
+  gpio_dummy_exit();
   remove_proc_entry("asgn2_proc", NULL);
   kmem_cache_destroy(asgn2_device.cache);
   cdev_del(asgn2_device.cdev);

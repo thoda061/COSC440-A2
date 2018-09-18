@@ -23,7 +23,7 @@
 #include <linux/interrupt.h>
 #include <linux/version.h>
 #include <linux/delay.h>
-#include <linux/init.h> 
+#include <linux/slab.h> 
 #if LINUX_VERSION_CODE > KERNEL_VERSION(3, 3, 0)
         #include <asm/switch_to.h>
 #else
@@ -33,6 +33,10 @@
 #define BCM2835_PERI_BASE 0x3f000000
 
 static u32 gpio_dummy_base;
+static u8 first_half_byte;
+static int half_byte_count;
+
+
 
 /* Define GPIO pins for the dummy device */
 static struct gpio gpio_dummy[] = {
@@ -48,9 +52,41 @@ static struct gpio gpio_dummy[] = {
                 { 27, GPIOF_IN, "GPIO27" },
 };
 
+typedef struct circular_buf_t {
+	char *buffer;
+	size_t head;
+	size_t tail;
+	size_t max;
+	int full;
+} circular_buf;
+
+typedef struct cbuf_data_t {
+	circular_buf cbuf;
+} cbuf_data;
+
+circular_buf cbuf;
+static cbuf_data t_data;
 static int dummy_irq;
-extern irqreturn_t dummyport_interrupt(int irq, void *dev_id);
-	
+
+void circular_buf_put(circular_buf cbuf, u8 data) {
+	cbuf.buffer[cbuf.head] = (char) data;
+	cbuf.head = (cbuf.head + 1)%cbuf.max;
+	if(cbuf.full) {
+		cbuf.tail = (cbuf.tail + 1)%cbuf.max;
+	} else if (cbuf.head == cbuf.tail) {
+		cbuf.full = 1;
+        }
+}
+
+char circular_buf_get(circular_buf cbuf) {
+	char ret = cbuf.buffer[cbuf.tail];
+	cbuf.tail = (cbuf.tail + 1)%cbuf.max;
+	if(cbuf.full && (cbuf.tail != cbuf.head)) {
+		cbuf.full = 0;
+	}
+	return ret;
+}	
+
 static inline u32
 gpio_inw(u32 addr)
 {
@@ -124,10 +160,40 @@ udelay(1);
 
 }
 
+static DECLARE_TASKLET(t1, read_cbuf,(unsigned long)&t_data);
+
+extern irqreturn_t dummyport_interrupt(int irq, void *dev_id) {
+	u8 half_byte;
+	u8 full_byte;
+
+	half_byte = read_half_byte();
+	if(half_byte_count == 1) {
+		half_byte_count = 0;
+		full_byte = (first_half_byte << 4) | half_byte;
+		printk(KERN_INFO "read %c of port\n", (char) full_byte);
+		circular_buf_put(cbuf, full_byte);
+		tasklet_schedule(&t1);
+	} else { 
+	       half_byte_count++;
+	       first_half_byte = half_byte;
+	}
+	return IRQ_HANDLED;
+}
+
 int gpio_dummy_init(void)
 {
     int ret;
- 
+
+    if((cbuf.buffer = kmalloc(sizeof(char) * 1000, GFP_KERNEL)) == NULL) {
+	    printk(KERN_INFO "failed to allocate circular buffer memory");
+	    return -ENOMEM;
+    }
+    cbuf.max = 1000;
+    cbuf.head = 0;
+    cbuf.tail = 0;
+    cbuf.full = 0;
+    t_data.cbuf = cbuf;
+
     gpio_dummy_base = (u32)ioremap_nocache(BCM2835_PERI_BASE + 0x200000, 4096);
     printk(KERN_WARNING "The gpio base is mapped to %x\n", gpio_dummy_base);
     ret = gpio_request_array(gpio_dummy, ARRAY_SIZE(gpio_dummy));
@@ -161,9 +227,8 @@ fail1:
 
 void gpio_dummy_exit(void)
 {
+    kfree(cbuf.buffer);
     free_irq(dummy_irq, NULL);
     gpio_free_array(gpio_dummy, ARRAY_SIZE(gpio_dummy));
     iounmap((void *)gpio_dummy_base);
 }
-
-MODULE_LICENSE("GPL");

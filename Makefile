@@ -1,8 +1,9 @@
 
 MODULE_NAME = asgn2
-obj-m += $(MODULE_NAME).o
-$(MODULE_NAME)-objs = gpio.o
-# EXTRA_CFLAGS += -Werror
+obj-m := $(MODULE_NAME).o
+$(MODULE_NAME)-objs := gpio.o
+EXTRA_CFLAGS += -Werror
+
 
 KDIR    := /lib/modules/$(shell uname -r)/build
 PWD     := $(shell pwd)
