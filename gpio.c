@@ -22,7 +22,7 @@
 #include <linux/gpio.h>
 #include <linux/interrupt.h>
 #include <linux/version.h>
-#include <linux/delay.h>
+#include <linux/delay.h> 
 #if LINUX_VERSION_CODE > KERNEL_VERSION(3, 3, 0)
         #include <asm/switch_to.h>
 #else
@@ -31,8 +31,9 @@
 
 #define BCM2835_PERI_BASE 0x3f000000
 
-static u32 gpio_dummy_base;
 
+static u32 gpio_dummy_base;
+extern irqreturn_t dummyport_interrupt(int irq, void *dev_id);
 
 /* Define GPIO pins for the dummy device */
 static struct gpio gpio_dummy[] = {
@@ -49,8 +50,7 @@ static struct gpio gpio_dummy[] = {
 };
 
 static int dummy_irq;
-extern irqreturn_t dummyport_interrupt(int irq, void *dev_id);
-
+	
 static inline u32
 gpio_inw(u32 addr)
 {
@@ -127,7 +127,7 @@ udelay(1);
 int gpio_dummy_init(void)
 {
     int ret;
-
+ 
     gpio_dummy_base = (u32)ioremap_nocache(BCM2835_PERI_BASE + 0x200000, 4096);
     printk(KERN_WARNING "The gpio base is mapped to %x\n", gpio_dummy_base);
     ret = gpio_request_array(gpio_dummy, ARRAY_SIZE(gpio_dummy));

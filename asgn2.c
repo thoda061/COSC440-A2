@@ -30,12 +30,14 @@
 #include <linux/seq_file.h>
 #include <linux/device.h>
 #include <linux/sched.h>
+#include "gpio.c"
 
 #define MYDEV_NAME "asgn2"
 #define MYIOC_TYPE 'k'
+#define BUFF_SIZE 1024 
 
 MODULE_LICENSE("GPL");
-MODULE_AUTHOR("Your Name");
+MODULE_AUTHOR("Daniel Thomson");
 MODULE_DESCRIPTION("COSC440 asgn2");
 
 
@@ -58,15 +60,47 @@ typedef struct asgn2_dev_t {
   struct kmem_cache *cache;      /* cache memory */
   struct class *class;     /* the udev class */
   struct device *device;   /* the udev device node */
+  int half_byte_count; /*number of half bytes read that haven't been combined into a full byte */
 } asgn2_dev;
 
-asgn2_dev asgn2_device;
+typedef struct circular_buf_t {
+	u8 buffer[BUFF_SIZE];
+	int head;
+	int tail;
+	int full;
+} circular_buf;
 
+typedef struct multi_page_queue_t {
+	int head;
+	int tail;
+	size_t head_off;
+	size_t tail_off;
+} mpq;
+
+asgn2_dev asgn2_device;
+circular_buf cbuf;
+mpq page_queue;
+
+static atomic_t data_ready;
+
+void readbuf_fun(unsigned long t_arg);
+static DECLARE_TASKLET(readbuf, readbuf_fun, 0);
+static DECLARE_WAIT_QUEUE_HEAD(read_wq);
+static DECLARE_WAIT_QUEUE_HEAD(open_wq);
 
 int asgn2_major = 0;                      /* major number of module */  
 int asgn2_minor = 0;                      /* minor number of module */
 int asgn2_dev_count = 1;                  /* number of devices */
 
+void circular_buf_put(circular_buf cbuf, u8 data) {
+	cbuf.buffer[cbuf.tail] = data;
+	cbuf.tail = (cbuf.tail+1)%BUFF_SIZE;
+	if(cbuf.full) {
+		cbuf.head = (cbuf.head+1)%BUFF_SIZE;
+	} else if (cbuf.head == cbuf.tail) {
+		cbuf.full = 1;
+	}
+}
 
 /**
  * This function frees all memory pages held by the module.
@@ -117,10 +151,11 @@ int asgn2_open(struct inode *inode, struct file *filp) {
   atomic_set(&asgn2_device.nprocs, init_nprocs + 1);
   if(atomic_read(&asgn2_device.nprocs)>atomic_read(&asgn2_device.max_nprocs)) {
 	  atomic_set(&asgn2_device.nprocs, init_nprocs);
-	  return -EBUSY;
+	  wait_event_interruptible(open_wq, atomic_read(&asgn2_device.nprocs) == 0);
   }
-  if(filp->f_mode == S_IWUSR) {
-	  free_memory_pages();
+  if(!((filp->f_mode & FMODE_READ) && !(filp->fmode & FMODE_WRITE))) {
+	  printk(KERN_ERROR "only read-only mode allowed");
+	  return -EACCES;
   }
 
   return 0; /* success */
@@ -137,6 +172,7 @@ int asgn2_release (struct inode *inode, struct file *filp) {
    * decrement process count
    */
   atomic_set(&asgn2_device.nprocs, atomic_read(&asgn2_device.nprocs) - 1);
+  wake_up_interruptible(&open_wq);
   return 0;
 }
 
@@ -147,16 +183,17 @@ int asgn2_release (struct inode *inode, struct file *filp) {
 ssize_t asgn2_read(struct file *filp, char __user *buf, size_t count,
 		 loff_t *f_pos) {
   size_t size_read = 0;     /* size read from virtual disk in this function */
-  size_t begin_offset;      /* the offset from the beginning of a page to
+  size_t begin_offset = 0;      /* the offset from the beginning of a page to
 			       start reading */
-  int begin_page_no = *f_pos / PAGE_SIZE; /* the first page which contains
+  int begin_page_no = page_queue.head; /* the first page which contains
 					     the requested data */
   int curr_page_no = 0;     /* the current page number */
   size_t curr_size_read;    /* size read from the virtual disk in this round */
   size_t size_to_be_read;   /* size to be read in the current round in 
 			       while loop */
 
-  struct list_head *ptr = asgn2_device.mem_list.next;
+  int pages_freed = 0;
+  int null_terminator = 0;
   page_node *curr;
   //char *tp;
 
@@ -179,32 +216,137 @@ ssize_t asgn2_read(struct file *filp, char __user *buf, size_t count,
    */
 
   if(*f_pos > asgn2_device.data_size) return 0;
-  list_for_each(ptr, &asgn2_device.mem_list) {
-	  //printk(KERN_INFO "ptr addresss %x\n", ptr);
-	  if(curr_page_no >= begin_page_no) {
-		  curr = list_entry(ptr, struct page_node_rec, list);
-		  size_to_be_read = min(count, (size_t)PAGE_SIZE);
-		  curr_size_read = 0;
-		 // printk(KERN_INFO "size_to_be_read %i\n", size_to_be_read);
-		  do {
-	          	begin_offset = curr_size_read;
-		  	curr_size_read += (size_to_be_read -
-		 	  	copy_to_user(buf+begin_offset+(int)size_read, 
-					  page_address(curr->page)+begin_offset,
-					  size_to_be_read));
-		  	//tp = page_address(curr->page);
-		  	//printk(KERN_INFO "page_addresss %c %c %c\n", tp[0], tp[1], tp[3]);
-		  	//printk(KERN_INFO "current read %i\n", curr_size_read);
-		  } while (curr_size_read < size_to_be_read);
-		  size_read += curr_size_read;
-		  count -= curr_size_read;
-	  }
-	  //printk(KERN_INFO "size read %i\n", size_read);
-	  curr_page_no += 1;
-	  //printk(KERN_INFO "curr_page_no %d\n", curr_page_no);
+  if(page_queue.tail == page_queue.head && page_queue.tail_off == page_queue.head_off)
+	  atomic_set(&data_ready, 0);
+
+  if(atomic_read(&data_ready) == 0)
+	  wait_event_interruptible(read_wq, atomic_read(&data_ready == 1));
+
+  count = min(asgn2_device.data_size - page_queue.head_off, count);
+
+  list_for_each_entry(curr, &asgn2_device.mem_list, list) {
+	  if(begin_page_no <= curr_page_no) {
+		  begin_offset = page_q.head_off;
+		  size_to_be_read = min(count, PAGE_SIZE - begin_offset);
+
+		  int i;
+		  for(i = 0; i < size_to_be_read; i++) {
+			  if((u8)(page_address(curr_page) + begin_offset + i) == '\0') {
+				  size_to_be_read -= (size_to_be_read - i);
+				  null_terminator = 1;
+				  break;
+			  }
+		  }
+
+		  while(size_to_be_read > 0) {
+			curr_size_read = size_to_be_read - copy_to_user(buf + size_read, page_address(curr->page) + begin_offset, size_to_be_read);
+			size_read += curr_size_read;
+			size_to_be_read -= curr_size_read;
+			count -= curr_size_read;
+			page_queue.head_offset = (page_queue.head_offset + curr_size_read)%PAGE_SIZE;
+			begin_offset = page_queue.head_offset;
+		}
+	}
+	if(begin_offset == 0) {
+		page_queue.head++;
+		__free_page(curr->page);
+		list_del(&curr->list);
+		kfree(curr);
+		pages_freed++;
+		curr_page_no++;
+		asgn2_device.num_pages--;
+	}
+	if(null_terminator == 1) break;
+
   }
-  *f_pos += size_read;
+
+  page_queue.head -= pages_freed;
+  page_queue.tail -= pages_freed;
+  asgn2_device.data_size -= pages_freed * PAGE_SIZE;
+
+  /*while (size_read < count) {
+	  curr = list_entry(ptr, page_node, list);
+	  if(ptr == &asgn1_device.mem_list) {
+		  printk(KERN_WARNING "invalid virtual memory access");
+		  return size_read;
+	  } else if (curr_page_no < begin_page_no) {
+		  ptr = ptr->next;
+		  curr_page_no++;
+    	  } else {
+		  begin_offset = *f_pos % PAGE_SIZE;
+		  size_to_be_read = (size_t)min((size_t)(count - size_read), (size_t)(PAGE_SIZE - begin_offset));
+		  do {
+			  curr_size_read = size_to_be_read - copy_to_user(buf + size_read, page_address(curr->page) + begin_offset, size_to_be_read);
+			  size_read += curr_size_read;
+			  *f_pos += curr_size_read;
+			  begin_offset += curr_size_read;
+			  size_to_be_read -= curr_size_read;
+		  } while (curr_size_read > 0);
+
+		  curr_page_no++;
+		  ptr = ptr->next;
+	}
+  }*/
+
   return size_read;
+}
+
+void readbuf_fun (unsigned long t_arg) {
+	size_t size_writtern = 0;
+	size_t begin_offset = 0;
+	int begin_page_no = page_queue.tail;
+
+	int curr_page_no = 0;
+	size_t curr_page_offset = page_queue.tail_offset;
+	size_t size_to_be_written;
+	int buf_count;
+
+	page_node *curr;
+
+	if(cbuf.tail > cbuf.head) {
+		buf_count = cbuf.tail - cbuf.head;
+	} else if (cbuf.head > cbuf.tail) {
+		buf_count = cbuf.tail + (BUFF_SIZE - cbuf.head);
+	} else buf_count = 0;
+
+	while(buf_count > (asgn2_device.num_pages*PAGE_SIZE) - asgn2_device.data_size) {
+		if(!(curr = kmem_cache_alloc(asgn2_device.cache, GFP_KERNEL))){
+			printk(KERN_ERR "failed to allocate memory\n");
+			return -ENOMEM;
+		}
+		if(!(curr->page = alloc_page(GFP_KERNEL))){
+			printk(KERN_ERR "falied to allocate page\n");
+			return -ENOMEM;
+		}
+		//printk(KERN_INFO "page address %x\n", page_address(curr->page));
+		list_add_tail(&(curr->list), &(asgn2_device.mem_list));
+		asgn2_device.num_pages += 1;
+  	}
+
+	list_for_each_entry(curr, &asgn2_device.mem_list, list) {
+		if(curr_page_no >= begin_page_no && buf_count > 0) {
+			begin_offset = curr_page_offset % PAGE_SIZE;
+			size_to_be_written = min(buf_count, (size_t)PAGE_OFFSET - begin_offset);
+
+			memcpy(page_address(curr->page) + begin_offset, cbuf.buffer + cbuf.head, size_to_be_written);
+			cbuf.head = (cbuf.head + size_to_written) % BUFF_SIZE;
+
+			size_written += size_to_be_written;
+			buf_count -= size_to_be_written;
+			curr_page_offset += size_to_be_written;
+			size_to_be_written = 0;
+			begin_offset = curr_page_offset % PAGE_SIZE;
+		}
+		curr_page_no++;
+	}
+	
+	if(size_written > 0 && cbuf.full == 1) cbuf.full = 0;
+	asgn2_device.data_size += size_written;
+	page_q.tail_offset = begin_offset;
+
+	atomic_set(&data_ready, 1);
+	wake_up_interruptible(&read_wq);
+
 }
 
 /**
@@ -330,6 +472,23 @@ long asgn2_ioctl (struct file *filp, unsigned cmd, unsigned long arg) {
   return -ENOTTY;
 }
 
+irqreturn_t dummyport_interrupt(int irq, void *dev_id) {
+	static u8 full_byte;
+
+	if(asgn2_device.half_byte_count == 1) {
+		asgn2_device.half_byte_count = 0;
+                full_byte |= read_half_byte();
+		printk(KERN_INFO "read %c of port\n", (char) full_byte);
+ 		circular_buf_put(cbuf, full_byte);
+		tasklet_schedule(&readbuf);
+
+        } else {
+		full_byte = read_half_byte() << 4;
+		asgn2_device.half_byte_count++;
+	}
+	return IRQ_HANDLED;	
+}
+
 struct file_operations asgn2_fops = {
   .owner = THIS_MODULE,
   .read = asgn2_read,
@@ -410,25 +569,27 @@ int __init asgn2_init_module(void){
    */
  
   atomic_set(&asgn2_device.nprocs, 0);
-  atomic_set(&asgn2_device.max_nprocs, 2);
+  atomic_set(&asgn2_device.max_nprocs, 1);
 
   //Allocate major number
   if(alloc_chrdev_region(&asgn2_device.dev, asgn2_minor, asgn2_dev_count, 
 			  "asgn2") < 0) {
+	  return -EBUSY;
   }
+
+  asgn2_major = MAJOR(asgn2_device.dev);
 
   //Allocate and add cdev
   if(!(asgn2_device.cdev = cdev_alloc())) {
 	printk(KERN_ERR "cdev_alloc() failed\n");
-        unregister_chrdev_region(asgn2_device.dev, asgn2_dev_count);
-	return -1;
+	result = -ENOMEM;
+        goto fail_cdev;
   }
   cdev_init(asgn2_device.cdev, &asgn2_fops);
   if(cdev_add(asgn2_device.cdev, asgn2_device.dev, asgn2_dev_count) < 0) {
 	printk(KERN_ERR "cdev_add() failed\n");
-        cdev_del(asgn2_device.cdev);
-        unregister_chrdev_region(asgn2_device.dev, asgn2_dev_count);
-	return -1;
+	result = -ENOMEM;
+	goto fail_cdev;
   }
 
   printk(KERN_INFO "device register successfully");
@@ -439,20 +600,22 @@ int __init asgn2_init_module(void){
   if(!(asgn2_device.cache = kmem_cache_create("asgn2_device.cache", 
 				  PAGE_SIZE, 0, SLAB_HWCACHE_ALIGN, NULL))) {
 	printk(KERN_ERR "kmem_cache_create failed\n");
-        return -ENOMEM;
+        result =  -ENOMEM;
+	goto fail_kmem_cache_create;
   }
   printk(KERN_INFO "mem cache allocated");
 
   //Create proc file
   if(proc_create("asgn2_proc", 0, NULL, &asgn2_proc_ops) == NULL) {
 	printk(KERN_ERR "proc_create failed\n");
-	cdev_del(asgn2_device.cdev);
-	unregister_chrdev_region(asgn2_device.dev, asgn2_dev_count);
-	return -1;
-  }    
+	result = -ENOMEM;
+	goto fail_proc_entry;
+  }
 
   asgn2_device.class = class_create(THIS_MODULE, MYDEV_NAME);
   if (IS_ERR(asgn2_device.class)) {
+	  result = -ENOMEM;
+	  goto fail_class;
   }
 
   asgn2_device.device = device_create(asgn2_device.class, NULL, 
@@ -465,17 +628,32 @@ int __init asgn2_init_module(void){
   
   printk(KERN_WARNING "set up udev entry\n");
   printk(KERN_WARNING "Hello world from %s\n", MYDEV_NAME);
+
+  gpio_dummy_init();
+
+  cbuf.head = 0;
+  cbuf.tail = 0;
+  cbuf.full = 0;
+
+  page_queue.head = 0;
+  page_queue.tail = 0;
+  page_queue.head_off = 0;
+  page_queue.tail_off = 0;
+
+  atomic_set(&data_ready, 0);
+
   return 0;
 
   /* cleanup code called when any of the initialization steps fail */
 fail_device:
    class_destroy(asgn2_device.class);
-
-
-   remove_proc_entry("asgn2_proc", NULL);
-   free_memory_pages();
-   kmem_cache_destroy(asgn2_device.cache);
+fail_class:
+   kmem_cach_destroy(asgn2_device_cache);
+fail_proc_entry:
    cdev_del(asgn2_device.cdev);
+fail_kmem_cache_create:
+   remove_proc_entry("asgn2_proc", NULL);
+fail_cdev:
    unregister_chrdev_region(asgn2_device.dev, asgn2_dev_count);
 
   /* COMPLETE ME */
@@ -490,6 +668,7 @@ fail_device:
  * Finalise the module
  */
 void __exit asgn2_exit_module(void){
+  gpio_dummy_exit();
   device_destroy(asgn2_device.class, asgn2_device.dev);
   class_destroy(asgn2_device.class);
   printk(KERN_WARNING "cleaned up udev entry\n");
@@ -500,8 +679,6 @@ void __exit asgn2_exit_module(void){
    * cleanup in reverse order
    */
   free_memory_pages();
-  device_destroy(asgn2_device.class, asgn2_device.dev);
-  class_destroy(asgn2_device.class);
   remove_proc_entry("asgn2_proc", NULL);
   kmem_cache_destroy(asgn2_device.cache);
   cdev_del(asgn2_device.cdev);
