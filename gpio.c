@@ -50,6 +50,7 @@ static struct gpio gpio_dummy[] = {
 
 static int dummy_irq;
 extern irqreturn_t dummyport_interrupt(int irq, void *dev_id);
+//EXPORT_SYMBOL_GPL(dummyport_interrupt);
 	
 static inline u32
 gpio_inw(u32 addr)
@@ -145,6 +146,7 @@ int gpio_dummy_init(void)
     printk(KERN_WARNING "Successfully requested IRQ# %d for %s\n", dummy_irq, gpio_dummy[ARRAY_SIZE(gpio_dummy)-1].label);
 
     ret = request_irq(dummy_irq, dummyport_interrupt, IRQF_TRIGGER_RISING | IRQF_ONESHOT, "gpio27", NULL);
+
 
     if(ret) {
 	printk(KERN_ERR "Unable to request IRQ for dummy device: %d\n", ret);
