@@ -82,7 +82,8 @@ typedef struct multi_page_queue_t {
 } mpq;
 
 asgn2_dev asgn2_device;
-circular_buf cbuf;
+static circular_buf cbuf;
+int null_position = -1;
 mpq page_queue;
 
 static atomic_t data_ready;
@@ -98,9 +99,10 @@ int asgn2_dev_count = 1;                  /* number of devices */
 
 /*This function puts the given data into the circular buffer and update the posistion of tail.
  * If the buffer is full then the oldest data in the buffer is dropped, and head is then updated*/
-void circular_buf_put(circular_buf cbuf, u8 data) {
+void circular_buf_put(u8 data) {
 	cbuf.buffer[cbuf.tail] = data;
 	cbuf.tail = (cbuf.tail+1)%BUFF_SIZE;
+	//printk(KERN_INFO "cbuf.tail %i\n", cbuf.tail);
 	if(cbuf.full) {
 		cbuf.head = (cbuf.head+1)%BUFF_SIZE;
 	} else if (cbuf.head == cbuf.tail) {
@@ -157,7 +159,8 @@ int asgn2_open(struct inode *inode, struct file *filp) {
   /* END SKELETON */
   /* START TRIM */
   if (atomic_read(&asgn2_device.nprocs) >= atomic_read(&asgn2_device.max_nprocs)) {
-    wait_event_interruptible(open_wq, atomic_read(&asgn2_device.nprocs) == 0);
+	  printk(KERN_INFO "You have been put on hold\n");
+    	  wait_event_interruptible(open_wq, atomic_read(&asgn2_device.nprocs) == 0);
   }
   
   if (!(!(filp->f_mode & FMODE_WRITE) && (filp->f_mode & FMODE_READ))) {
@@ -236,6 +239,12 @@ ssize_t asgn2_read(struct file *filp, char __user *buf, size_t count,
 
   if(*f_pos > asgn2_device.data_size) return 0;
 
+  if(page_queue.head_off == null_position) {
+	  null_position = -1;
+	  page_queue.head_off++;
+	  return 0;
+  }
+
   /*If no data in page queue, put process to sleep untill there is data*/
   if(page_queue.tail == page_queue.head && page_queue.tail_off == page_queue.head_off)
 	  atomic_set(&data_ready, 0);
@@ -244,12 +253,14 @@ ssize_t asgn2_read(struct file *filp, char __user *buf, size_t count,
 	  wait_event_interruptible(read_wq, atomic_read(&data_ready) == 1);
 
   count = min(asgn2_device.data_size - page_queue.head_off, count);
+  //printk(KERN_INFO "count %i\n", (int)count);
 
   /*Loop through page list and read data to user*/
   list_for_each_entry(curr, &asgn2_device.mem_list, list) {
 	  if(begin_page_no <= curr_page_no) {
 		  begin_offset = page_queue.head_off;
 		  size_to_be_read = min(count,(size_t)PAGE_SIZE - begin_offset);
+		  //printk(KERN_INFO "size_to_be_read %i before null search\n", (int) size_to_be_read);
 
 		  //Search for null terminator in page and adjust size_to_be_read if found
 		  for(i = 0; i < size_to_be_read; i++) {
@@ -259,7 +270,8 @@ ssize_t asgn2_read(struct file *filp, char __user *buf, size_t count,
 				  break;
 			  }
 		  }
-		  
+		  //printk(KERN_INFO "size_to_be_read %i after null search\n", (int) size_to_be_read);
+
 		  //Copy data to user
 		  while(size_to_be_read > 0) {
 			curr_size_read = size_to_be_read - copy_to_user(buf + size_read, page_address(curr->page) + begin_offset, size_to_be_read);
@@ -280,9 +292,21 @@ ssize_t asgn2_read(struct file *filp, char __user *buf, size_t count,
 		curr_page_no++;
 		asgn2_device.num_pages--;
 	}
-	if(null_terminator == 1) break;
+	//printk(KERN_INFO "size_read %i\n", (int) size_read);
+	//printk(KERN_INFO "null_terminator %i\n", null_terminator);
+	if(null_terminator == 1) {
+		null_terminator = 0;
+		null_position = page_queue.head_off;
+		//break;
+		goto end;
+	}
 
   }
+
+  end:
+  	printk(KERN_INFO "size_read %i\n", (int) size_read);
+        //printk(KERN_INFO "Enter end\n");
+        return size_read;
 
   /* START TRIM */
   /*if (*f_pos >= asgn2_device.data_size) return 0;
@@ -339,13 +363,15 @@ void readbuf_fun (unsigned long t_arg) {
 	int buf_count;		   /*amount of data in circular buffer*/
 
 	page_node *curr;
-
+        //printk(KERN_INFO "cbuf.tail %i, cbuf.head %i\n", cbuf.tail, cbuf.head);
 	/*This determins the amount of data in circular buffer*/
 	if(cbuf.tail > cbuf.head) {
 		buf_count = cbuf.tail - cbuf.head;
 	} else if (cbuf.head > cbuf.tail) {
 		buf_count = cbuf.tail + (BUFF_SIZE - cbuf.head);
 	} else buf_count = 0;
+
+	//printk(KERN_INFO "buf_count %i\n", buf_count);
 
 	/*This allocates the required amount of pages required to storage buf_count bytes*/
 	while(buf_count > (asgn2_device.num_pages*PAGE_SIZE) - asgn2_device.data_size) {
@@ -382,6 +408,8 @@ void readbuf_fun (unsigned long t_arg) {
 	page_queue.tail_off = begin_offset;
 
 	atomic_set(&data_ready, 1);
+	//printk(KERN_INFO "data ready %i\n", atomic_read(&data_ready));
+
 	wake_up_interruptible(&read_wq);
 
 }
@@ -531,8 +559,9 @@ irqreturn_t dummyport_interrupt(int irq, void *dev_id) {
 	if(asgn2_device.half_byte_count == 1) {
 		asgn2_device.half_byte_count = 0;
                 full_byte |= read_half_byte();
-		printk(KERN_INFO "read %c of port\n", (char) full_byte);
- 		circular_buf_put(cbuf, full_byte);
+		//printk(KERN_INFO "read %c of port\n", (char) full_byte);
+ 		circular_buf_put(full_byte);
+		//printk(KERN_INFO "cbuf.tail %i in interrupt\n", cbuf.tail);
 		tasklet_schedule(&readbuf);
 
         } else {
