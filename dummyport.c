@@ -192,6 +192,7 @@ int asgn2_release (struct inode *inode, struct file *filp) {
   
   //Wake up next process waiting to read
   wake_up_interruptible(&open_wq);
+  printk(KERN_INFO "Wake up sleepy\n");
   /* END TRIM */
   return 0;
 }
@@ -239,6 +240,8 @@ ssize_t asgn2_read(struct file *filp, char __user *buf, size_t count,
 
   if(*f_pos > asgn2_device.data_size) return 0;
 
+  printk(KERN_INFO "null_position %d\n", null_position);
+  printk(KERN_INFO "head_off %d\n", page_queue.head_off);
   if(page_queue.head_off == null_position) {
 	  null_position = -1;
 	  page_queue.head_off++;
@@ -306,6 +309,10 @@ ssize_t asgn2_read(struct file *filp, char __user *buf, size_t count,
   end:
   	printk(KERN_INFO "size_read %i\n", (int) size_read);
         //printk(KERN_INFO "Enter end\n");
+	if(size_read == 0 && null_position != -1) {
+		null_position = -1;
+		page_queue.head_off++;
+	}
         return size_read;
 
   /* START TRIM */
