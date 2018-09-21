@@ -36,7 +36,7 @@
 
 #define MYDEV_NAME "asgn2"
 #define MYIOC_TYPE 'k'
-#define BUFF_SIZE 1024 
+#define BUFF_SIZE 4096 
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Your Name");
@@ -381,6 +381,8 @@ void readbuf_fun (unsigned long t_arg) {
 		buf_count = cbuf.tail - cbuf.head;
 	} else if (cbuf.head > cbuf.tail) {
 		buf_count = cbuf.tail + (BUFF_SIZE - cbuf.head);
+	} else if (cbuf.full) {
+		buf_count = BUFF_SIZE;	
 	} else buf_count = 0;
 
 	//printk(KERN_INFO "buf_count %i\n", buf_count);
@@ -396,6 +398,7 @@ void readbuf_fun (unsigned long t_arg) {
 		//printk(KERN_INFO "page address %x\n", page_address(curr->page));
 		list_add_tail(&(curr->list), &(asgn2_device.mem_list));
 		asgn2_device.num_pages += 1;
+		//page_queue.tail++;
   	}
 	
 	list_for_each_entry(curr, &asgn2_device.mem_list, list) {
@@ -417,7 +420,10 @@ void readbuf_fun (unsigned long t_arg) {
 	
 	if(size_written > 0 && cbuf.full == 1) cbuf.full = 0;
 	asgn2_device.data_size += size_written;
-	if(begin_offset == 0) page_queue.tail++;
+	if(begin_offset == 0){
+		//printk(KERN_INFO "curr_page_offset %d\n", curr_page_offset); 
+	       	page_queue.tail++;
+	}
 	page_queue.tail_off = begin_offset;
 
 	atomic_set(&data_ready, 1);
