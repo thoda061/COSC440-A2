@@ -217,6 +217,7 @@ ssize_t asgn2_read(struct file *filp, char __user *buf, size_t count,
   int null_terminator = 0;  /* Indicates whether a null indicator was found*/
   int i;
   page_node *curr;
+  page_node *temp;
   
   /* START SKELETON */
   /* COMPLETE ME */
@@ -238,7 +239,7 @@ ssize_t asgn2_read(struct file *filp, char __user *buf, size_t count,
    */
   /* END SKELETON */
 
-  if(*f_pos > asgn2_device.data_size) return 0;
+  //if(*f_pos > asgn2_device.data_size) return 0;
 
   printk(KERN_INFO "null_position %d\n", null_position);
   printk(KERN_INFO "head_off %d\n", page_queue.head_off);
@@ -249,6 +250,7 @@ ssize_t asgn2_read(struct file *filp, char __user *buf, size_t count,
   }
 
   /*If no data in page queue, put process to sleep untill there is data*/
+  printk(KERN_INFO "head %d %d tail %d %d\n", page_queue.head, page_queue.head_off, page_queue.tail, page_queue.tail_off);
   if(page_queue.tail == page_queue.head && page_queue.tail_off == page_queue.head_off)
 	  atomic_set(&data_ready, 0);
 
@@ -259,7 +261,7 @@ ssize_t asgn2_read(struct file *filp, char __user *buf, size_t count,
   //printk(KERN_INFO "count %i\n", (int)count);
 
   /*Loop through page list and read data to user*/
-  list_for_each_entry(curr, &asgn2_device.mem_list, list) {
+  list_for_each_entry_safe(curr, temp, &asgn2_device.mem_list, list) {
 	  if(begin_page_no <= curr_page_no) {
 		  begin_offset = page_queue.head_off;
 		  size_to_be_read = min(count,(size_t)PAGE_SIZE - begin_offset);
@@ -313,6 +315,9 @@ ssize_t asgn2_read(struct file *filp, char __user *buf, size_t count,
 		null_position = -1;
 		page_queue.head_off++;
 	}
+	page_queue.head -= pages_freed;
+	page_queue.tail -= pages_freed;
+	asgn2_device.data_size -= pages_freed * PAGE_SIZE;
         return size_read;
 
   /* START TRIM */
@@ -396,7 +401,7 @@ void readbuf_fun (unsigned long t_arg) {
 	list_for_each_entry(curr, &asgn2_device.mem_list, list) {
 		if(curr_page_no >= begin_page_no && buf_count > 0) {
 			begin_offset = curr_page_offset % PAGE_SIZE;
-			size_to_be_written = min((size_t)buf_count, (size_t)PAGE_OFFSET - begin_offset);
+			size_to_be_written = min((size_t)buf_count, (size_t)PAGE_SIZE - begin_offset);
 
 			memcpy(page_address(curr->page) + begin_offset, cbuf.buffer + cbuf.head, size_to_be_written);
 			cbuf.head = (cbuf.head + size_to_be_written) % BUFF_SIZE;
@@ -412,6 +417,7 @@ void readbuf_fun (unsigned long t_arg) {
 	
 	if(size_written > 0 && cbuf.full == 1) cbuf.full = 0;
 	asgn2_device.data_size += size_written;
+	if(begin_offset == 0) page_queue.tail++;
 	page_queue.tail_off = begin_offset;
 
 	atomic_set(&data_ready, 1);
