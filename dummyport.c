@@ -1,8 +1,8 @@
 
 /**
- * File: asgn2.c
- * Date: 13/03/2011
- * Author: Your Name 
+ * File: dummyport.c
+ * Date: 13/09/2018
+ * Author: Daniel Thomson
  * Version: 0.1
  *
  * This is a module which serves as a virtual ramdisk which disk size is
@@ -39,7 +39,7 @@
 #define BUFF_SIZE 4096 
 
 MODULE_LICENSE("GPL");
-MODULE_AUTHOR("Your Name");
+MODULE_AUTHOR("Daniel Thomson");
 MODULE_DESCRIPTION("COSC440 asgn2");
 
 
@@ -83,7 +83,7 @@ typedef struct multi_page_queue_t {
 
 asgn2_dev asgn2_device;
 static circular_buf cbuf;
-int null_position = -1;
+int null_position = -1;  /*Used to store the position of null terminator within current page*/
 mpq page_queue;
 
 static atomic_t data_ready;
@@ -241,8 +241,8 @@ ssize_t asgn2_read(struct file *filp, char __user *buf, size_t count,
 
   //if(*f_pos > asgn2_device.data_size) return 0;
 
-  printk(KERN_INFO "null_position %d\n", null_position);
-  printk(KERN_INFO "head_off %d\n", page_queue.head_off);
+  //printk(KERN_INFO "null_position %d\n", null_position);
+  //printk(KERN_INFO "head_off %d\n", page_queue.head_off);
   if(page_queue.head_off == null_position) {
 	  null_position = -1;
 	  page_queue.head_off++;
@@ -250,7 +250,7 @@ ssize_t asgn2_read(struct file *filp, char __user *buf, size_t count,
   }
 
   /*If no data in page queue, put process to sleep untill there is data*/
-  printk(KERN_INFO "head %d %d tail %d %d\n", page_queue.head, page_queue.head_off, page_queue.tail, page_queue.tail_off);
+  //printk(KERN_INFO "head %d %d tail %d %d\n", page_queue.head, page_queue.head_off, page_queue.tail, page_queue.tail_off);
   if(page_queue.tail == page_queue.head && page_queue.tail_off == page_queue.head_off)
 	  atomic_set(&data_ready, 0);
 
@@ -309,7 +309,7 @@ ssize_t asgn2_read(struct file *filp, char __user *buf, size_t count,
   }
 
   end:
-  	printk(KERN_INFO "size_read %i\n", (int) size_read);
+  	//printk(KERN_INFO "size_read %i\n", (int) size_read);
         //printk(KERN_INFO "Enter end\n");
 	if(size_read == 0 && null_position != -1) {
 		null_position = -1;
